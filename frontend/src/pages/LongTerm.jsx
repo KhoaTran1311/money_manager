@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 
@@ -61,6 +61,8 @@ const EMPTY_ASSET = {
   name: "",
   type: "",
 };
+
+const PUBLIC_SECURITY_TYPES = ["Stock", "ETF", "Crypto"];
 
 const mapQuoteType = (quoteType) => {
   switch (quoteType) {
@@ -187,11 +189,20 @@ function LongTerm() {
   const [editingId, setEditingId] = useState(null);
   const [formError, setFormError] = useState("");
   const [isAssetModalOpen, setIsAssetModalOpen] = useState(false);
+  const [assetFlow, setAssetFlow] = useState("public");
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState("");
   const [lastQuotePrice, setLastQuotePrice] = useState(null);
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearchingResults, setIsSearchingResults] = useState(false);
+  const [searchResultsError, setSearchResultsError] = useState("");
+  const [highlightedResult, setHighlightedResult] = useState(-1);
+  const [showSearchResults, setShowSearchResults] = useState(false);
   const [selectedBreakdown, setSelectedBreakdown] = useState("assetType");
+  const [assetsLoading, setAssetsLoading] = useState(true);
+  const [assetsError, setAssetsError] = useState("");
+  const [isSavingAsset, setIsSavingAsset] = useState(false);
 
   const holdingsWithValues = useMemo(
     () =>
@@ -251,6 +262,53 @@ function LongTerm() {
     BREAKDOWN_TABS.find((tab) => tab.id === selectedBreakdown) ??
     BREAKDOWN_TABS[0];
 
+  useEffect(() => {
+    const fetchAssets = async () => {
+      setAssetsLoading(true);
+      setAssetsError("");
+      try {
+        const response = await fetch("/api/long-term/assets/");
+        if (!response.ok) {
+          throw new Error("Failed to load assets.");
+        }
+        const data = await response.json();
+        setAssets(Array.isArray(data) ? data : []);
+      } catch (error) {
+        setAssetsError(error?.message || "Unable to load assets.");
+      } finally {
+        setAssetsLoading(false);
+      }
+    };
+
+    fetchAssets();
+  }, []);
+
+  useEffect(() => {
+    if (!isAssetModalOpen) {
+      return undefined;
+    }
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [isAssetModalOpen]);
+
+  useEffect(() => {
+    if (!isAssetModalOpen || assetFlow !== "public") {
+      return undefined;
+    }
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      setSearchResultsError("");
+      return undefined;
+    }
+    const timeout = setTimeout(() => {
+      fetchSearchResults(searchQuery);
+    }, 300);
+    return () => clearTimeout(timeout);
+  }, [assetFlow, isAssetModalOpen, searchQuery]);
+
   const handleAssetChange = (field) => (event) => {
     const nextValue = event.target.value;
     setAssetForm((prev) => {
@@ -275,18 +333,28 @@ function LongTerm() {
     setEditingId(null);
     setFormError("");
     setIsAssetModalOpen(false);
+    setAssetFlow("public");
     setSearchQuery("");
     setSearchError("");
     setLastQuotePrice(null);
+    setSearchResults([]);
+    setSearchResultsError("");
+    setHighlightedResult(-1);
+    setShowSearchResults(false);
   };
 
   const openAddAssetModal = () => {
     setAssetForm(EMPTY_ASSET);
     setEditingId(null);
     setFormError("");
+    setAssetFlow("public");
     setSearchQuery("");
     setSearchError("");
     setLastQuotePrice(null);
+    setSearchResults([]);
+    setSearchResultsError("");
+    setHighlightedResult(-1);
+    setShowSearchResults(false);
     setIsAssetModalOpen(true);
   };
 
@@ -333,14 +401,38 @@ function LongTerm() {
       currency: assetForm.currency.trim(),
     };
 
-    setAssets((prev) => {
-      if (editingId) {
-        return prev.map((asset) => (asset.id === editingId ? nextAsset : asset));
+    const saveAsset = async () => {
+      setIsSavingAsset(true);
+      setFormError("");
+      try {
+        const response = await fetch(
+          editingId ? `/api/long-term/assets/${editingId}/` : "/api/long-term/assets/",
+          {
+            method: editingId ? "PUT" : "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(nextAsset),
+          }
+        );
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => ({}));
+          throw new Error(errorPayload.error || "Unable to save asset.");
+        }
+        const savedAsset = await response.json();
+        setAssets((prev) => {
+          if (editingId) {
+            return prev.map((asset) => (asset.id === editingId ? savedAsset : asset));
+          }
+          return [savedAsset, ...prev];
+        });
+        resetForm();
+      } catch (error) {
+        setFormError(error?.message || "Unable to save asset.");
+      } finally {
+        setIsSavingAsset(false);
       }
-      return [...prev, nextAsset];
-    });
+    };
 
-    resetForm();
+    saveAsset();
   };
 
   const handleEdit = (asset) => {
@@ -359,14 +451,21 @@ function LongTerm() {
       currency: asset.currency ?? "",
     });
     setFormError("");
+    setAssetFlow(
+      PUBLIC_SECURITY_TYPES.includes(asset.type) ? "public" : "private"
+    );
     setSearchQuery(asset.ticker || "");
     setSearchError("");
     setLastQuotePrice(null);
+    setSearchResults([]);
+    setSearchResultsError("");
+    setHighlightedResult(-1);
+    setShowSearchResults(false);
     setIsAssetModalOpen(true);
   };
 
-  const handleSearch = async () => {
-    const trimmed = searchQuery.trim();
+  const handleSearch = async (overrideQuery) => {
+    const trimmed = (overrideQuery ?? searchQuery).trim();
     if (!trimmed) {
       setSearchError("Enter a ticker or symbol to search.");
       return;
@@ -413,10 +512,60 @@ function LongTerm() {
     }
   };
 
-  const handleDelete = (assetId) => {
-    setAssets((prev) => prev.filter((asset) => asset.id !== assetId));
-    if (editingId === assetId) {
-      resetForm();
+  const fetchSearchResults = async (query) => {
+    if (!query.trim()) {
+      setSearchResults([]);
+      setSearchResultsError("");
+      return;
+    }
+    setIsSearchingResults(true);
+    setSearchResultsError("");
+    try {
+      const response = await fetch(
+        `/api/market/search/?query=${encodeURIComponent(query)}`
+      );
+      if (!response.ok) {
+        throw new Error("Search failed.");
+      }
+      const results = await response.json();
+      setSearchResults(Array.isArray(results) ? results : []);
+      setShowSearchResults(true);
+      setHighlightedResult(-1);
+    } catch (error) {
+      setSearchResultsError(error?.message || "Search failed.");
+      setSearchResults([]);
+    } finally {
+      setIsSearchingResults(false);
+    }
+  };
+
+  const handleSearchSelect = async (result) => {
+    const symbol = result?.symbol || result?.ticker || "";
+    if (!symbol) {
+      return;
+    }
+    setSearchQuery(symbol);
+    setSearchResults([]);
+    setSearchResultsError("");
+    setHighlightedResult(-1);
+    setShowSearchResults(false);
+    await handleSearch(symbol);
+  };
+
+  const handleDelete = async (assetId) => {
+    try {
+      const response = await fetch(`/api/long-term/assets/${assetId}/`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        throw new Error("Unable to delete asset.");
+      }
+      setAssets((prev) => prev.filter((asset) => asset.id !== assetId));
+      if (editingId === assetId) {
+        resetForm();
+      }
+    } catch (error) {
+      setFormError(error?.message || "Unable to delete asset.");
     }
   };
 
@@ -564,7 +713,25 @@ function LongTerm() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {holdingsWithValues.length ? (
+                {assetsLoading ? (
+                  <tr>
+                    <td
+                      colSpan={10}
+                      className="px-3 py-6 text-center text-sm text-slate-500"
+                    >
+                      Loading assets...
+                    </td>
+                  </tr>
+                ) : assetsError ? (
+                  <tr>
+                    <td
+                      colSpan={10}
+                      className="px-3 py-6 text-center text-sm text-rose-600"
+                    >
+                      {assetsError}
+                    </td>
+                  </tr>
+                ) : holdingsWithValues.length ? (
                   holdingsWithValues.map((holding) => {
                     const currentPrice =
                       holding.shares > 0 ? holding.value / holding.shares : 0;
@@ -650,46 +817,153 @@ function LongTerm() {
           </div>
         </section>
 
-        {isAssetModalOpen ? (
-          <div className="fixed inset-0 z-40 flex items-center justify-center px-4 py-10">
-            <button
-              type="button"
-              className="absolute inset-0 bg-slate-900/50"
-              onClick={resetForm}
-              aria-label="Close asset form"
-            />
-            <div className="relative z-10 w-full max-w-3xl rounded-2xl bg-white p-6 shadow-xl">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-slate-900">
-                    {editingId ? "Edit Asset" : "Add Asset"}
-                  </h3>
-                  <p className="mt-1 text-sm text-slate-500">
-                    Fill in the asset details to keep your portfolio up to date.
-                  </p>
+      </main>
+
+      {isAssetModalOpen ? (
+        <div className="fixed inset-0 z-40">
+          <button
+            type="button"
+            className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm"
+            onClick={resetForm}
+            aria-label="Close asset form"
+          />
+          <div className="relative z-10 flex h-full items-start justify-center p-4">
+            <div className="w-full max-w-3xl max-h-[calc(100vh-2rem)] overflow-y-auto rounded-2xl bg-white p-6 shadow-xl">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-semibold text-slate-900">
+                  {editingId ? "Edit Asset" : "Add Asset"}
+                </h3>
+                <p className="mt-1 text-sm text-slate-500">
+                  Fill in the asset details to keep your portfolio up to date.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={resetForm}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600"
+              >
+                Close
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-sm font-semibold text-slate-700">Asset type</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Choose how this asset should be added before searching.
+                </p>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <button
+                    type="button"
+                    onClick={() => setAssetFlow("public")}
+                    className={`rounded-xl border px-4 py-3 text-left text-sm transition ${
+                      assetFlow === "public"
+                        ? "border-indigo-200 bg-white shadow-sm"
+                        : "border-slate-200 bg-slate-50"
+                    }`}
+                  >
+                    <p className="font-semibold text-slate-800">
+                      Public security
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Stock / ETF / Crypto (supports search + autofill)
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAssetFlow("private")}
+                    className={`rounded-xl border px-4 py-3 text-left text-sm transition ${
+                      assetFlow === "private"
+                        ? "border-indigo-200 bg-white shadow-sm"
+                        : "border-slate-200 bg-slate-50"
+                    }`}
+                  >
+                    <p className="font-semibold text-slate-800">
+                      Private / Alternative
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Real estate / Art / Collectible / Private equity / Other
+                    </p>
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={resetForm}
-                  className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600"
-                >
-                  Close
-                </button>
               </div>
 
-              <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+              {assetFlow === "public" ? (
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                  <p className="text-sm font-semibold text-slate-700">Search asset</p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Search by ticker (e.g. AAPL, VOO, BTC-USD) to autofill details.
+                  <p className="text-sm font-semibold text-slate-700">
+                    Search asset
                   </p>
-                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <p className="mt-1 text-xs text-slate-500">
+                    Search by ticker or name to autofill details.
+                  </p>
+                  <div className="relative mt-3">
                     <input
-                      className="min-w-[220px] flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                      className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                       value={searchQuery}
                       onChange={(event) => setSearchQuery(event.target.value)}
-                      placeholder="AAPL"
+                      onFocus={() => {
+                        if (searchResults.length) {
+                          setShowSearchResults(true);
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (!showSearchResults || !searchResults.length) {
+                          return;
+                        }
+                        if (event.key === "ArrowDown") {
+                          event.preventDefault();
+                          setHighlightedResult((prev) =>
+                            Math.min(prev + 1, searchResults.length - 1)
+                          );
+                        } else if (event.key === "ArrowUp") {
+                          event.preventDefault();
+                          setHighlightedResult((prev) => Math.max(prev - 1, 0));
+                        } else if (event.key === "Enter") {
+                          event.preventDefault();
+                          const result = searchResults[highlightedResult];
+                          if (result) {
+                            handleSearchSelect(result);
+                          }
+                        } else if (event.key === "Escape") {
+                          setShowSearchResults(false);
+                        }
+                      }}
+                      placeholder="Search by ticker or name"
                     />
+                    {showSearchResults && searchResults.length ? (
+                      <div className="absolute z-10 mt-2 w-full rounded-lg border border-slate-200 bg-white shadow-lg">
+                        {searchResults.map((result, index) => (
+                          <button
+                            key={`${result.symbol}-${index}`}
+                            type="button"
+                            onMouseDown={() => handleSearchSelect(result)}
+                            className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm ${
+                              index === highlightedResult
+                                ? "bg-indigo-50 text-indigo-700"
+                                : "text-slate-700 hover:bg-slate-50"
+                            }`}
+                          >
+                            <span className="font-semibold">
+                              {result.symbol}
+                            </span>
+                            <span className="ml-2 flex-1 truncate text-xs text-slate-500">
+                              {result.name}
+                            </span>
+                            {result.exchange ? (
+                              <span className="ml-3 text-xs text-slate-400">
+                                {result.exchange}
+                              </span>
+                            ) : null}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                  {isSearchingResults ? (
+                    <p className="mt-2 text-xs text-slate-500">Searching...</p>
+                  ) : null}
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
                     <button
                       type="button"
                       onClick={handleSearch}
@@ -704,153 +978,174 @@ function LongTerm() {
                       </span>
                     ) : null}
                   </div>
+                  {searchResultsError ? (
+                    <p className="mt-2 text-sm text-rose-600">
+                      {searchResultsError}
+                    </p>
+                  ) : null}
                   {searchError ? (
                     <p className="mt-2 text-sm text-rose-600">{searchError}</p>
                   ) : null}
                 </div>
+              ) : (
+                <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
+                  Private assets use the manual entry flow below.
+                </div>
+              )}
 
-                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                <label className="text-sm text-slate-600">
+                  Shares *
+                  <input
+                    className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    type="number"
+                    step="0.0001"
+                    value={assetForm.shares}
+                    onChange={handleAssetChange("shares")}
+                    placeholder="10"
+                  />
+                </label>
+                <label className="text-sm text-slate-600">
+                  Bought Price *
+                  <input
+                    className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    type="number"
+                    step="0.01"
+                    value={assetForm.boughtPrice}
+                    onChange={handleAssetChange("boughtPrice")}
+                    placeholder="120.50"
+                  />
+                </label>
+                <label className="text-sm text-slate-600">
+                  Value *
+                  <input
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-500"
+                    type="number"
+                    step="0.01"
+                    value={assetForm.value}
+                    readOnly
+                    placeholder="1800"
+                  />
+                </label>
+                <label className="text-sm text-slate-600">
+                  Broker *
+                  <input
+                    className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    value={assetForm.broker}
+                    onChange={handleAssetChange("broker")}
+                    placeholder="Fidelity"
+                  />
+                </label>
+              </div>
+
+              <details className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <summary className="cursor-pointer text-sm font-semibold text-slate-700">
+                  Additional metadata (searchable)
+                </summary>
+                <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                   <label className="text-sm text-slate-600">
-                    Shares *
-                    <input
-                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                      type="number"
-                      step="0.0001"
-                      value={assetForm.shares}
-                      onChange={handleAssetChange("shares")}
-                      placeholder="10"
-                    />
-                  </label>
-                  <label className="text-sm text-slate-600">
-                    Bought Price *
-                    <input
-                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                      type="number"
-                      step="0.01"
-                      value={assetForm.boughtPrice}
-                      onChange={handleAssetChange("boughtPrice")}
-                      placeholder="120.50"
-                    />
-                  </label>
-                  <label className="text-sm text-slate-600">
-                    Value *
+                    Ticker *
                     <input
                       className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-500"
-                      type="number"
-                      step="0.01"
-                      value={assetForm.value}
-                      readOnly
-                      placeholder="1800"
+                      value={assetForm.ticker}
+                      onChange={handleAssetChange("ticker")}
+                      readOnly={assetFlow === "public"}
+                      aria-readonly={assetFlow === "public"}
+                      placeholder={assetFlow === "public" ? "Search first" : "PRIVATE-001"}
                     />
                   </label>
                   <label className="text-sm text-slate-600">
-                    Broker *
+                    Name *
                     <input
                       className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                      value={assetForm.broker}
-                      onChange={handleAssetChange("broker")}
-                      placeholder="Fidelity"
+                      value={assetForm.name}
+                      onChange={handleAssetChange("name")}
+                      placeholder="Apple Inc."
+                    />
+                  </label>
+                  <label className="text-sm text-slate-600">
+                    Security Type *
+                    <input
+                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                      value={assetForm.type}
+                      onChange={handleAssetChange("type")}
+                      placeholder={
+                        assetFlow === "public"
+                          ? "Stock, ETF, Crypto"
+                          : "Real estate, Art, Collectible"
+                      }
+                    />
+                  </label>
+                  <label className="text-sm text-slate-600">
+                    Sector (optional)
+                    <input
+                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                      value={assetForm.sector}
+                      onChange={handleAssetChange("sector")}
+                      placeholder="Technology"
+                    />
+                  </label>
+                  <label className="text-sm text-slate-600">
+                    Industry (optional)
+                    <input
+                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                      value={assetForm.industry}
+                      onChange={handleAssetChange("industry")}
+                      placeholder="Consumer Electronics"
+                    />
+                  </label>
+                  <label className="text-sm text-slate-600">
+                    Countries (optional)
+                    <input
+                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                      value={assetForm.countries}
+                      onChange={handleAssetChange("countries")}
+                      placeholder="United States, Canada"
+                    />
+                  </label>
+                  <label className="text-sm text-slate-600">
+                    Currency (optional)
+                    <input
+                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                      value={assetForm.currency}
+                      onChange={handleAssetChange("currency")}
+                      placeholder="USD"
                     />
                   </label>
                 </div>
+              </details>
 
-                <details className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                  <summary className="cursor-pointer text-sm font-semibold text-slate-700">
-                    Additional metadata (searchable)
-                  </summary>
-                  <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                    <label className="text-sm text-slate-600">
-                      Ticker *
-                      <input
-                        className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-500"
-                        value={assetForm.ticker}
-                        readOnly
-                        aria-readonly="true"
-                      />
-                    </label>
-                    <label className="text-sm text-slate-600">
-                      Name *
-                      <input
-                        className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                        value={assetForm.name}
-                        onChange={handleAssetChange("name")}
-                        placeholder="Apple Inc."
-                      />
-                    </label>
-                    <label className="text-sm text-slate-600">
-                      Security Type *
-                      <input
-                        className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                        value={assetForm.type}
-                        onChange={handleAssetChange("type")}
-                        placeholder="Stock, ETF, Crypto"
-                      />
-                    </label>
-                    <label className="text-sm text-slate-600">
-                      Sector (optional)
-                      <input
-                        className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                        value={assetForm.sector}
-                        onChange={handleAssetChange("sector")}
-                        placeholder="Technology"
-                      />
-                    </label>
-                    <label className="text-sm text-slate-600">
-                      Industry (optional)
-                      <input
-                        className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                        value={assetForm.industry}
-                        onChange={handleAssetChange("industry")}
-                        placeholder="Consumer Electronics"
-                      />
-                    </label>
-                    <label className="text-sm text-slate-600">
-                      Countries (optional)
-                      <input
-                        className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                        value={assetForm.countries}
-                        onChange={handleAssetChange("countries")}
-                        placeholder="United States, Canada"
-                      />
-                    </label>
-                    <label className="text-sm text-slate-600">
-                      Currency (optional)
-                      <input
-                        className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                        value={assetForm.currency}
-                        onChange={handleAssetChange("currency")}
-                        placeholder="USD"
-                      />
-                    </label>
-                  </div>
-                </details>
+              {formError ? (
+                <p className="text-sm text-rose-600">{formError}</p>
+              ) : null}
 
-                {formError ? (
-                  <p className="text-sm text-rose-600">{formError}</p>
-                ) : null}
-
-                <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="submit"
+                  className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white"
+                  disabled={isSavingAsset}
+                >
+                  {isSavingAsset
+                    ? "Saving..."
+                    : editingId
+                    ? "Update Asset"
+                    : "Add Asset"}
+                </button>
+                {editingId ? (
                   <button
-                    type="submit"
-                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white"
+                    type="button"
+                    onClick={resetForm}
+                    className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600"
                   >
-                    {editingId ? "Update Asset" : "Add Asset"}
+                    Cancel Edit
                   </button>
-                  {editingId ? (
-                    <button
-                      type="button"
-                      onClick={resetForm}
-                      className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600"
-                    >
-                      Cancel Edit
-                    </button>
-                  ) : null}
-                </div>
-              </form>
+                ) : null}
+              </div>
+            </form>
             </div>
           </div>
-        ) : null}
-      </main>
+        </div>
+      ) : null}
     </div>
   );
 }

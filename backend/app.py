@@ -283,6 +283,157 @@ def market_quote():
         }
     )
 
+@app.route("/api/market/search/")
+def market_search():
+    query = (request.args.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "query parameter is required"}), 400
+
+    try:
+        search = yf.Search(query)
+        quotes = getattr(search, "quotes", None) or []
+    except Exception:
+        quotes = []
+
+    results = []
+    for quote in quotes[:10]:
+        symbol = quote.get("symbol") or quote.get("ticker")
+        name = (
+            quote.get("shortname")
+            or quote.get("shortName")
+            or quote.get("longname")
+            or quote.get("longName")
+        )
+        exchange = quote.get("exchDisp") or quote.get("exchange")
+        results.append(
+            {
+                "symbol": symbol,
+                "name": name,
+                "exchange": exchange,
+                "quoteType": quote.get("quoteType") or quote.get("typeDisp"),
+            }
+        )
+
+    return jsonify(results)
+
+def _serialize_asset(item):
+    return {
+        "id": item.get("id"),
+        "ticker": item.get("ticker"),
+        "name": item.get("name"),
+        "type": item.get("security_type"),
+        "boughtPrice": _normalize_number(item.get("bought_price")),
+        "shares": _normalize_number(item.get("shares")),
+        "value": _normalize_number(item.get("value")),
+        "broker": item.get("broker"),
+        "sector": item.get("sector") or "",
+        "industry": item.get("industry") or "",
+        "countries": item.get("countries") or "",
+        "currency": item.get("currency") or "",
+    }
+
+
+@app.route("/api/long-term/assets/", methods=["GET", "POST"])
+def long_term_assets():
+    if request.method == "GET":
+        result = (
+            supabase.table("portfolio_assets")
+            .select("*")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        error_response = _handle_supabase_error(result)
+        if error_response:
+            return error_response
+        return jsonify([_serialize_asset(item) for item in (result.data or [])])
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        ticker = (payload.get("ticker") or "").strip().upper()
+        name = (payload.get("name") or "").strip()
+        security_type = (payload.get("type") or "").strip()
+        broker = (payload.get("broker") or "").strip()
+        bought_price = _parse_decimal(payload.get("boughtPrice"), "boughtPrice")
+        shares = _parse_decimal(payload.get("shares"), "shares")
+        if not ticker or not name or not security_type or not broker:
+            return jsonify({"error": "Missing required asset fields"}), 400
+        if bought_price is None or shares is None:
+            return jsonify({"error": "Invalid price or shares"}), 400
+        value = bought_price * shares
+        record = {
+            "ticker": ticker,
+            "name": name,
+            "security_type": security_type,
+            "bought_price": bought_price,
+            "shares": shares,
+            "value": value,
+            "broker": broker,
+            "sector": (payload.get("sector") or "").strip(),
+            "industry": (payload.get("industry") or "").strip(),
+            "countries": (payload.get("countries") or "").strip(),
+            "currency": (payload.get("currency") or "").strip(),
+        }
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    result = supabase.table("portfolio_assets").insert(record).execute()
+    error_response = _handle_supabase_error(result)
+    if error_response:
+        return error_response
+    item = (result.data or [{}])[0]
+    return jsonify(_serialize_asset(item)), 201
+
+
+@app.route("/api/long-term/assets/<asset_id>/", methods=["PUT", "DELETE"])
+def long_term_asset_detail(asset_id):
+    if request.method == "DELETE":
+        result = supabase.table("portfolio_assets").delete().eq("id", asset_id).execute()
+        error_response = _handle_supabase_error(result)
+        if error_response:
+            return error_response
+        return jsonify({"status": "deleted"})
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        ticker = (payload.get("ticker") or "").strip().upper()
+        name = (payload.get("name") or "").strip()
+        security_type = (payload.get("type") or "").strip()
+        broker = (payload.get("broker") or "").strip()
+        bought_price = _parse_decimal(payload.get("boughtPrice"), "boughtPrice")
+        shares = _parse_decimal(payload.get("shares"), "shares")
+        if not ticker or not name or not security_type or not broker:
+            return jsonify({"error": "Missing required asset fields"}), 400
+        if bought_price is None or shares is None:
+            return jsonify({"error": "Invalid price or shares"}), 400
+        value = bought_price * shares
+        record = {
+            "ticker": ticker,
+            "name": name,
+            "security_type": security_type,
+            "bought_price": bought_price,
+            "shares": shares,
+            "value": value,
+            "broker": broker,
+            "sector": (payload.get("sector") or "").strip(),
+            "industry": (payload.get("industry") or "").strip(),
+            "countries": (payload.get("countries") or "").strip(),
+            "currency": (payload.get("currency") or "").strip(),
+        }
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    result = (
+        supabase.table("portfolio_assets")
+        .update(record)
+        .eq("id", asset_id)
+        .execute()
+    )
+    error_response = _handle_supabase_error(result)
+    if error_response:
+        return error_response
+    item = (result.data or [{}])[0]
+    return jsonify(_serialize_asset(item))
+
 
 @app.route("/api/short-term/credit-cards/", methods=["GET", "POST"])
 def short_term_credit_cards():
