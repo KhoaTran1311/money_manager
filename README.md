@@ -27,5 +27,12 @@ pip install -r requirements.txt
 
 run:
 ```
-python manage.py runserver
+python app.py
+```
+
+Supabase setup:
+- Create a `.env` file inside `backend/` with:
+```
+SUPABASE_URL=your_project_url
+SUPABASE_KEY=your_anon_key
 ```

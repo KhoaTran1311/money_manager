@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from supabase import create_client, Client
+import yfinance as yf
 
 
 load_dotenv()
@@ -247,6 +248,39 @@ def short_term_accounts():
             }
         ),
         201,
+    )
+
+
+@app.route("/api/market/quote/")
+def market_quote():
+    symbols = (request.args.get("symbols") or "").strip()
+    if not symbols:
+        return jsonify({"error": "symbols query parameter is required"}), 400
+
+    symbol = symbols.split(",")[0].strip()
+    if not symbol:
+        return jsonify({"error": "symbols query parameter is required"}), 400
+
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.get_info() or {}
+    except Exception:
+        info = {}
+
+    if not info:
+        return jsonify({"error": "Quote lookup failed"}), 502
+
+    return jsonify(
+        {
+            "symbol": info.get("symbol") or symbol.upper(),
+            "shortName": info.get("shortName") or info.get("longName"),
+            "longName": info.get("longName") or info.get("shortName"),
+            "quoteType": info.get("quoteType") or info.get("instrumentType"),
+            "regularMarketPrice": _normalize_number(info.get("regularMarketPrice")),
+            "currency": info.get("currency"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+        }
     )
 
 
