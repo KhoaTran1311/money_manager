@@ -20,6 +20,8 @@ import {
   getSubscriptions,
   getTransactions,
   createTransaction,
+  updateTransaction,
+  deleteTransaction,
 } from "../api/shortTerm.js";
 import { formatMoney, formatMoneyDecimal } from "../utils/format.js";
 import {
@@ -62,6 +64,8 @@ function ShortTerm() {
   const [creditCards, setCreditCards] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [editingId, setEditingId] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
   const [formError, setFormError] = useState("");
   const [formData, setFormData] = useState({
@@ -69,6 +73,11 @@ function ShortTerm() {
     description: "",
     category: "",
     amount: "",
+    isRecurring: false,
+    recurrenceFrequency: "monthly",
+    recurrenceDay: null,
+    recurrenceStartDate: "",
+    recurrenceEndDate: "",
   });
 
   useEffect(() => {
@@ -179,11 +188,36 @@ function ShortTerm() {
 
   const handleOpenModal = () => {
     setFormError("");
+    setIsEditMode(false);
+    setEditingId(null);
     setFormData({
       date: "",
       description: "",
       category: categoryOptions[0] || "Other",
       amount: "",
+      isRecurring: false,
+      recurrenceFrequency: "monthly",
+      recurrenceDay: null,
+      recurrenceStartDate: "",
+      recurrenceEndDate: "",
+    });
+    setIsModalOpen(true);
+  };
+
+  const handleOpenEditModal = (transaction) => {
+    setFormError("");
+    setIsEditMode(true);
+    setEditingId(transaction.id);
+    setFormData({
+      date: transaction.date,
+      description: transaction.description || "",
+      category: transaction.category,
+      amount: transaction.amount.toString(),
+      isRecurring: transaction.isRecurring || false,
+      recurrenceFrequency: transaction.recurrenceFrequency || "monthly",
+      recurrenceDay: transaction.recurrenceDay || null,
+      recurrenceStartDate: transaction.recurrenceStartDate || "",
+      recurrenceEndDate: transaction.recurrenceEndDate || "",
     });
     setIsModalOpen(true);
   };
@@ -191,6 +225,8 @@ function ShortTerm() {
   const handleCloseModal = () => {
     if (isSaving) return;
     setIsModalOpen(false);
+    setIsEditMode(false);
+    setEditingId(null);
   };
 
   const handleInputChange = (event) => {
@@ -206,23 +242,66 @@ function ShortTerm() {
       setFormError("Date, category, and amount are required.");
       return;
     }
+    
+    if (formData.isRecurring && !formData.recurrenceStartDate) {
+      setFormError("Start date is required for recurring transactions.");
+      return;
+    }
 
     const payload = {
       date: formData.date,
       description: formData.description,
       category: formData.category,
       amount: Number(formData.amount),
+      isRecurring: formData.isRecurring,
     };
+    
+    if (formData.isRecurring) {
+      payload.recurrenceFrequency = formData.recurrenceFrequency;
+      payload.recurrenceDay = formData.recurrenceDay ? Number(formData.recurrenceDay) : null;
+      payload.recurrenceStartDate = formData.recurrenceStartDate;
+      payload.recurrenceEndDate = formData.recurrenceEndDate || null;
+    }
 
     try {
       setIsSaving(true);
-      const created = await createTransaction(payload);
-      setAllTransactions((prev) => [created, ...prev]);
+      
+      if (isEditMode && editingId) {
+        // Update existing transaction
+        const updated = await updateTransaction(editingId, payload);
+        setAllTransactions((prev) =>
+          prev.map((tx) => (tx.id === editingId ? updated : tx))
+        );
+      } else {
+        // Create new transaction
+        const created = await createTransaction(payload);
+        setAllTransactions((prev) => [created, ...prev]);
+      }
+      
       setIsModalOpen(false);
+      setIsEditMode(false);
+      setEditingId(null);
     } catch (error) {
-      setFormError("Unable to save transaction. Please try again.");
+      setFormError(
+        isEditMode
+          ? "Unable to update transaction. Please try again."
+          : "Unable to save transaction. Please try again."
+      );
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleDelete = async (transactionId) => {
+    if (!window.confirm("Are you sure you want to delete this transaction?")) {
+      return;
+    }
+
+    try {
+      await deleteTransaction(transactionId);
+      setAllTransactions((prev) => prev.filter((tx) => tx.id !== transactionId));
+    } catch (error) {
+      alert("Unable to delete transaction. Please try again.");
     }
   };
 
@@ -231,10 +310,15 @@ function ShortTerm() {
     previousTotal > 0 ? ((totalChange / previousTotal) * 100).toFixed(1) : 0;
 
   // Subscriptions calculations
+  const recurringTransactions = allTransactions.filter(tx => tx.isRecurring && tx.recurrenceFrequency === 'monthly');
+  const recurringMonthlyTotal = recurringTransactions.reduce((sum, tx) => sum + (tx.amount || 0), 0);
+  
   const monthlySubscriptionCost = subscriptions.reduce((sum, sub) => {
     if (sub.billingCycle === "monthly") return sum + sub.amount;
     return sum + sub.amount / 12;
-  }, 0);
+  }, 0) + recurringMonthlyTotal;
+  
+  const totalSubscriptionCount = subscriptions.length + recurringTransactions.length;
 
   const upcomingSubscriptions = subscriptions
     .filter((sub) => sub.nextBilling)
@@ -301,7 +385,7 @@ function ShortTerm() {
                   totalChange > 0 ? "text-rose-500" : "text-emerald-500"
                 }`}
               >
-                {totalChange > 0 ? "↑" : "↓"} {Math.abs(percentChange)}%
+                {totalChange > 0 ? "â†‘" : "â†“"} {Math.abs(percentChange)}%
               </span>
               <span className="text-xs text-slate-400">vs {periodLabel.previous.toLowerCase()}</span>
             </div>
@@ -327,7 +411,7 @@ function ShortTerm() {
               {formatMoneyDecimal(monthlySubscriptionCost)}
             </p>
             <p className="mt-2 text-xs text-slate-400">
-              {subscriptions.length} active subscriptions
+              {totalSubscriptionCount} active subscriptions
             </p>
           </div>
 
@@ -511,17 +595,20 @@ function ShortTerm() {
                     Category {sortConfig.key === "category" && (sortConfig.direction === "asc" ? "↑" : "↓")}
                   </th>
                   <th
-                    className="cursor-pointer pb-3 text-right font-semibold text-slate-600 hover:text-slate-900"
+                    className="cursor-pointer pb-3 text-left font-semibold text-slate-600 hover:text-slate-900"
                     onClick={() => handleSort("amount")}
                   >
                     Amount {sortConfig.key === "amount" && (sortConfig.direction === "asc" ? "↑" : "↓")}
+                  </th>
+                  <th className="pb-3 text-right font-semibold text-slate-600">
+                    Actions
                   </th>
                 </tr>
               </thead>
               <tbody>
                 {sortedTransactions.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="py-6 text-center text-sm text-slate-400">
+                    <td colSpan={5} className="text-center" className="py-6 text-center text-sm text-slate-400">
                       No transactions yet. Add your first entry to populate this table.
                     </td>
                   </tr>
@@ -529,8 +616,8 @@ function ShortTerm() {
                   sortedTransactions.map((tx) => (
                     <tr key={tx.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50">
                       <td className="py-3 text-slate-500">{tx.dateFormatted}</td>
-                      <td className="py-3 font-medium text-slate-800">{tx.description || "—"}</td>
-                      <td className="py-3">
+                      <td className="py-3 font-medium text-slate-800">{tx.description || "â€”"}</td>
+                      <td className="py-3 text-right">
                         <span
                           className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium"
                           style={{
@@ -547,6 +634,24 @@ function ShortTerm() {
                       </td>
                       <td className="py-3 text-right font-semibold text-slate-800">
                         {formatMoney(tx.amount)}
+                      </td>
+                      <td className="py-3 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            onClick={() => handleOpenEditModal(tx)}
+                            className="rounded-lg px-3 py-1.5 text-xs font-medium text-indigo-600 transition hover:bg-indigo-50"
+                            title="Edit transaction"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleDelete(tx.id)}
+                            className="rounded-lg px-3 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50"
+                            title="Delete transaction"
+                          >
+                            Delete
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -589,14 +694,14 @@ function ShortTerm() {
                     }`}
                   >
                     <div className="flex items-center gap-3">
-                      <span className="text-xl">{sub.icon || "🔔"}</span>
+                      <span className="text-xl">{sub.icon || "ðŸ””"}</span>
                       <div>
                         <p className="text-sm font-medium text-slate-800">{sub.name}</p>
                         <p className="text-xs text-slate-500">
                           {nextDate
                             ? nextDate.toLocaleDateString("en-US", { month: "short", day: "numeric" })
                             : "No billing date"}
-                          {isUpcoming && <span className="ml-1 text-amber-600">• Soon</span>}
+                          {isUpcoming && <span className="ml-1 text-amber-600">â€¢ Soon</span>}
                         </p>
                       </div>
                     </div>
@@ -636,7 +741,7 @@ function ShortTerm() {
                   className="flex items-center justify-between rounded-lg bg-slate-50 p-3"
                 >
                   <div className="flex items-center gap-3">
-                    <span className="text-xl">{account.icon || "🏦"}</span>
+                    <span className="text-xl">{account.icon || "ðŸ¦"}</span>
                     <div>
                       <p className="text-sm font-medium text-slate-800">{account.name}</p>
                       <p className="text-xs text-slate-500">
@@ -678,11 +783,11 @@ function ShortTerm() {
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                      <span className="text-xl">{card.icon || "💳"}</span>
+                      <span className="text-xl">{card.icon || "ðŸ’³"}</span>
                       <div>
                         <p className="text-sm font-medium text-slate-800">{card.name}</p>
                         <p className="text-xs text-slate-500">
-                          •••• {card.lastFour} • {card.type}
+                          â€¢â€¢â€¢â€¢ {card.lastFour} â€¢ {card.type}
                         </p>
                       </div>
                     </div>
@@ -702,7 +807,7 @@ function ShortTerm() {
                             {card.pointsBalance.toLocaleString()} pts
                           </p>
                           <p className="text-xs text-slate-400">
-                            ≈ {formatMoney(card.pointsBalance * card.pointsValue)}
+                            â‰ˆ {formatMoney(card.pointsBalance * card.pointsValue)}
                           </p>
                         </>
                       ) : (
@@ -744,10 +849,10 @@ function ShortTerm() {
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-emerald-500">
-                  New Transaction
+                  {isEditMode ? "Edit Transaction" : "New Transaction"}
                 </p>
                 <h3 className="mt-1 text-xl font-semibold text-slate-900">
-                  Add manual spending entry
+                  {isEditMode ? "Update spending entry" : "Add manual spending entry"}
                 </h3>
               </div>
               <button
@@ -816,6 +921,87 @@ function ShortTerm() {
                 />
               </label>
 
+              {/* Recurring Transaction Section */}
+              <div className="border-t border-slate-200 pt-4">
+                <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                  <input
+                    type="checkbox"
+                    name="isRecurring"
+                    checked={formData.isRecurring}
+                    onChange={(e) => setFormData(prev => ({ ...prev, isRecurring: e.target.checked }))}
+                    className="h-4 w-4 rounded border-slate-300 text-emerald-500 focus:ring-emerald-500"
+                  />
+                  Make this a recurring transaction
+                </label>
+
+                {formData.isRecurring && (
+                  <div className="mt-4 space-y-4 rounded-lg bg-emerald-50 p-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="text-sm font-medium text-slate-700">
+                        Frequency
+                        <select
+                          name="recurrenceFrequency"
+                          value={formData.recurrenceFrequency}
+                          onChange={handleInputChange}
+                          className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
+                        >
+                          <option value="daily">Daily</option>
+                          <option value="weekly">Weekly</option>
+                          <option value="monthly">Monthly</option>
+                          <option value="yearly">Yearly</option>
+                        </select>
+                      </label>
+
+                      {formData.recurrenceFrequency === "monthly" && (
+                        <label className="text-sm font-medium text-slate-700">
+                          Day of Month
+                          <input
+                            type="number"
+                            name="recurrenceDay"
+                            value={formData.recurrenceDay || ""}
+                            onChange={handleInputChange}
+                            min="1"
+                            max="31"
+                            placeholder="1-31"
+                            className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
+                          />
+                        </label>
+                      )}
+                    </div>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="text-sm font-medium text-slate-700">
+                        Start Date
+                        <input
+                          type="date"
+                          name="recurrenceStartDate"
+                          value={formData.recurrenceStartDate}
+                          onChange={handleInputChange}
+                          className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
+                          required
+                        />
+                      </label>
+
+                      <label className="text-sm font-medium text-slate-700">
+                        End Date (Optional)
+                        <input
+                          type="date"
+                          name="recurrenceEndDate"
+                          value={formData.recurrenceEndDate}
+                          onChange={handleInputChange}
+                          className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
+                        />
+                      </label>
+                    </div>
+
+                    <p className="text-xs text-slate-600">
+                      This transaction will automatically appear on the specified schedule.
+                      Leave end date empty for indefinite recurrence.
+                    </p>
+                  </div>
+                )}
+              </div>
+
               {formError && (
                 <p className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-600">
                   {formError}
@@ -836,7 +1022,13 @@ function ShortTerm() {
                   className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-70"
                   disabled={isSaving}
                 >
-                  {isSaving ? "Saving..." : "Save Transaction"}
+                  {isSaving
+                    ? isEditMode
+                      ? "Updating..."
+                      : "Saving..."
+                    : isEditMode
+                      ? "Update Transaction"
+                      : "Save Transaction"}
                 </button>
               </div>
             </form>

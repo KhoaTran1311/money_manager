@@ -9,11 +9,20 @@ export const categoryColors = {
   Other: "#6b7280",
 };
 
+// Helper function to parse date string as local date (not UTC)
+const parseLocalDate = (dateString) => {
+  if (!dateString) return new Date();
+  
+  // Parse the date string as local date to avoid timezone shifts
+  const [year, month, day] = dateString.split('-').map(Number);
+  return new Date(year, month - 1, day);
+};
+
 const normalizeTransactions = (transactions) =>
   transactions.map((t) => ({
     ...t,
     amount: Number(t.amount ?? 0),
-    dateObj: new Date(t.date),
+    dateObj: parseLocalDate(t.date),
   }));
 
 const getDateRange = (period, now) => {
@@ -107,4 +116,3 @@ export const getComparisonData = (transactions, period) => {
     };
   });
 };
-
