@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   PieChart,
   Pie,
@@ -12,13 +12,9 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
-import {
-  getSpendingByPeriod,
-  aggregateByCategory,
-  getComparisonData,
-  categoryColors,
-  formatMoney,
-} from "../data.js";
+import { getTransactions } from "../api/shortTerm.js";
+import { formatMoney } from "../utils/format.js";
+import { aggregateByCategory, getComparisonData, getSpendingByPeriod } from "../utils/shortTerm.js";
 
 const PERIOD_OPTIONS = [
   { value: "week", label: "This Week" },
@@ -64,13 +60,37 @@ const PieTooltip = ({ active, payload }) => {
 
 function ShortTermDashboard() {
   const [selectedPeriod, setSelectedPeriod] = useState("week");
+  const [transactions, setTransactions] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    let isActive = true;
+
+    getTransactions()
+      .then((data) => {
+        if (!isActive) return;
+        setTransactions(data);
+      })
+      .catch(() => {
+        if (!isActive) return;
+        setTransactions([]);
+      })
+      .finally(() => {
+        if (!isActive) return;
+        setIsLoading(false);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
 
   const { pieData, comparisonData, currentTotal, previousTotal, periodLabel } =
     useMemo(() => {
       const { currentTransactions, previousTransactions } =
-        getSpendingByPeriod(selectedPeriod);
+        getSpendingByPeriod(transactions, selectedPeriod);
       const categoryData = aggregateByCategory(currentTransactions);
-      const comparison = getComparisonData(selectedPeriod);
+      const comparison = getComparisonData(transactions, selectedPeriod);
 
       const total = categoryData.reduce((sum, c) => sum + c.amount, 0);
       const prevTotal = comparison.reduce((sum, c) => sum + c.previous, 0);
@@ -91,7 +111,9 @@ function ShortTermDashboard() {
         previousTotal: prevTotal,
         periodLabel: labels[selectedPeriod],
       };
-    }, [selectedPeriod]);
+    }, [selectedPeriod, transactions]);
+
+  const hasData = transactions.length > 0;
 
   const totalChange = currentTotal - previousTotal;
   const percentChange =
@@ -138,6 +160,12 @@ function ShortTermDashboard() {
           </div>
         </div>
       </div>
+
+      {!isLoading && !hasData && (
+        <div className="rounded-xl border border-dashed border-slate-200 bg-white p-6 text-sm text-slate-500">
+          Add transactions to see short-term insights here.
+        </div>
+      )}
 
       {/* Charts Grid */}
       <div className="grid gap-6 lg:grid-cols-2">

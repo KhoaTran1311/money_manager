@@ -2,7 +2,7 @@ how to run?
 
 # Frontned  
 
-install deps.:  
+install dependencies:  
 ```
 cd frontend
 npm install
@@ -16,10 +16,11 @@ npm run dev
 
 # Backend  
 
-install deps.:  
+install dependencies:  
 ```
 cd backend
 python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 

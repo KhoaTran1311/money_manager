@@ -3,7 +3,8 @@ import { Link } from "react-router-dom";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 
 import NetworthChart from "../components/NetworthChart.jsx";
-import { formatMoney, portfolioHoldings } from "../data.js";
+import { portfolioHoldings } from "../data.js";
+import { formatMoney } from "../utils/format.js";
 
 const BREAKDOWN_TABS = [
   {

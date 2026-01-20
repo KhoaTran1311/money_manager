@@ -10,12 +10,8 @@ import {
   YAxis,
 } from "recharts";
 
-import {
-  assets,
-  formatMoney,
-  networthCategories,
-  networthCategoryHistory,
-} from "../data.js";
+import { assets, networthCategories, networthCategoryHistory } from "../data.js";
+import { formatMoney } from "../utils/format.js";
 
 const RANGE_OPTIONS = [
   { value: "1w", label: "1W", days: 7 },

@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   BarChart,
@@ -15,17 +15,19 @@ import {
 } from "recharts";
 
 import {
-  spendingTransactions,
-  getSpendingByPeriod,
+  getAccounts,
+  getCreditCards,
+  getSubscriptions,
+  getTransactions,
+  createTransaction,
+} from "../api/shortTerm.js";
+import { formatMoney, formatMoneyDecimal } from "../utils/format.js";
+import {
   aggregateByCategory,
-  getComparisonData,
   categoryColors,
-  formatMoney,
-  formatMoneyDecimal,
-  subscriptions,
-  accountBalances,
-  creditCards,
-} from "../data.js";
+  getComparisonData,
+  getSpendingByPeriod,
+} from "../utils/shortTerm.js";
 
 const PERIOD_OPTIONS = [
   { value: "week", label: "This Week" },
@@ -54,6 +56,48 @@ const CustomTooltip = ({ active, payload }) => {
 function ShortTerm() {
   const [selectedPeriod, setSelectedPeriod] = useState("month");
   const [sortConfig, setSortConfig] = useState({ key: "date", direction: "desc" });
+  const [allTransactions, setAllTransactions] = useState([]);
+  const [subscriptions, setSubscriptions] = useState([]);
+  const [accountBalances, setAccountBalances] = useState([]);
+  const [creditCards, setCreditCards] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [formError, setFormError] = useState("");
+  const [formData, setFormData] = useState({
+    date: "",
+    description: "",
+    category: "",
+    amount: "",
+  });
+
+  useEffect(() => {
+    let isActive = true;
+
+    Promise.all([getTransactions(), getSubscriptions(), getAccounts(), getCreditCards()])
+      .then(([transactionsData, subscriptionsData, accountsData, creditCardsData]) => {
+        if (!isActive) return;
+        setAllTransactions(transactionsData);
+        setSubscriptions(subscriptionsData);
+        setAccountBalances(accountsData);
+        setCreditCards(creditCardsData);
+      })
+      .catch(() => {
+        if (!isActive) return;
+        setAllTransactions([]);
+        setSubscriptions([]);
+        setAccountBalances([]);
+        setCreditCards([]);
+      })
+      .finally(() => {
+        if (!isActive) return;
+        setIsLoading(false);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
 
   const {
     pieData,
@@ -61,11 +105,11 @@ function ShortTerm() {
     currentTotal,
     previousTotal,
     periodLabel,
-    transactions,
+    transactions: periodTransactions,
   } = useMemo(() => {
-    const { currentTransactions } = getSpendingByPeriod(selectedPeriod);
+    const { currentTransactions } = getSpendingByPeriod(allTransactions, selectedPeriod);
     const categoryData = aggregateByCategory(currentTransactions);
-    const comparison = getComparisonData(selectedPeriod);
+    const comparison = getComparisonData(allTransactions, selectedPeriod);
 
     const total = categoryData.reduce((sum, c) => sum + c.amount, 0);
     const prevTotal = comparison.reduce((sum, c) => sum + c.previous, 0);
@@ -81,13 +125,12 @@ function ShortTerm() {
     // Get formatted transactions for table
     const formattedTransactions = currentTransactions.map((t, idx) => ({
       ...t,
-      id: idx,
-      dateFormatted: new Date(t.date).toLocaleDateString("en-US", {
+      id: t.id ?? idx,
+      dateFormatted: t.dateObj.toLocaleDateString("en-US", {
         weekday: "short",
         month: "short",
         day: "numeric",
       }),
-      dateObj: new Date(t.date),
     }));
 
     return {
@@ -98,11 +141,11 @@ function ShortTerm() {
       periodLabel: labels[selectedPeriod],
       transactions: formattedTransactions,
     };
-  }, [selectedPeriod]);
+  }, [selectedPeriod, allTransactions]);
 
   // Sorted transactions
   const sortedTransactions = useMemo(() => {
-    const sorted = [...transactions];
+    const sorted = [...periodTransactions];
     sorted.sort((a, b) => {
       let aVal, bVal;
       if (sortConfig.key === "date") {
@@ -123,13 +166,64 @@ function ShortTerm() {
       return 0;
     });
     return sorted;
-  }, [transactions, sortConfig]);
+  }, [periodTransactions, sortConfig]);
 
   const handleSort = (key) => {
     setSortConfig((prev) => ({
       key,
       direction: prev.key === key && prev.direction === "desc" ? "asc" : "desc",
     }));
+  };
+
+  const categoryOptions = Object.keys(categoryColors);
+
+  const handleOpenModal = () => {
+    setFormError("");
+    setFormData({
+      date: "",
+      description: "",
+      category: categoryOptions[0] || "Other",
+      amount: "",
+    });
+    setIsModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    if (isSaving) return;
+    setIsModalOpen(false);
+  };
+
+  const handleInputChange = (event) => {
+    const { name, value } = event.target;
+    setFormData((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setFormError("");
+
+    if (!formData.date || !formData.category || !formData.amount) {
+      setFormError("Date, category, and amount are required.");
+      return;
+    }
+
+    const payload = {
+      date: formData.date,
+      description: formData.description,
+      category: formData.category,
+      amount: Number(formData.amount),
+    };
+
+    try {
+      setIsSaving(true);
+      const created = await createTransaction(payload);
+      setAllTransactions((prev) => [created, ...prev]);
+      setIsModalOpen(false);
+    } catch (error) {
+      setFormError("Unable to save transaction. Please try again.");
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const totalChange = currentTotal - previousTotal;
@@ -143,9 +237,10 @@ function ShortTerm() {
   }, 0);
 
   const upcomingSubscriptions = subscriptions
+    .filter((sub) => sub.nextBilling)
     .filter((sub) => {
       const nextDate = new Date(sub.nextBilling);
-      const now = new Date("2026-01-19");
+      const now = new Date();
       const daysDiff = Math.ceil((nextDate - now) / (1000 * 60 * 60 * 24));
       return daysDiff <= 14 && daysDiff >= 0;
     })
@@ -159,6 +254,10 @@ function ShortTerm() {
   const totalPoints = creditCards.reduce((sum, card) => sum + (card.pointsBalance || 0), 0);
   const totalPointsValue = creditCards.reduce(
     (sum, card) => sum + (card.pointsBalance || 0) * (card.pointsValue || 0),
+    0
+  );
+  const totalCashbackEarned = creditCards.reduce(
+    (sum, card) => sum + (card.cashbackEarned || 0),
     0
   );
 
@@ -182,6 +281,11 @@ function ShortTerm() {
       </header>
 
       <main className="mx-auto max-w-7xl space-y-6 px-6 py-8">
+        {isLoading && (
+          <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
+            Loading short-term data...
+          </div>
+        )}
         {/* Top Summary Cards */}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -369,13 +473,19 @@ function ShortTerm() {
 
         {/* Transaction Details Table */}
         <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="text-lg font-semibold text-slate-800">Transaction Details</h3>
               <p className="mt-1 text-sm text-slate-500">
-                {transactions.length} transactions in {periodLabel.current.toLowerCase()}
+                {periodTransactions.length} transactions in {periodLabel.current.toLowerCase()}
               </p>
             </div>
+            <button
+              onClick={handleOpenModal}
+              className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600"
+            >
+              + Add Transaction
+            </button>
           </div>
 
           <div className="mt-4 overflow-x-auto">
@@ -409,30 +519,38 @@ function ShortTerm() {
                 </tr>
               </thead>
               <tbody>
-                {sortedTransactions.map((tx) => (
-                  <tr key={tx.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50">
-                    <td className="py-3 text-slate-500">{tx.dateFormatted}</td>
-                    <td className="py-3 font-medium text-slate-800">{tx.description}</td>
-                    <td className="py-3">
-                      <span
-                        className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium"
-                        style={{
-                          backgroundColor: `${categoryColors[tx.category]}15`,
-                          color: categoryColors[tx.category],
-                        }}
-                      >
-                        <span
-                          className="h-1.5 w-1.5 rounded-full"
-                          style={{ backgroundColor: categoryColors[tx.category] }}
-                        />
-                        {tx.category}
-                      </span>
-                    </td>
-                    <td className="py-3 text-right font-semibold text-slate-800">
-                      {formatMoney(tx.amount)}
+                {sortedTransactions.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="py-6 text-center text-sm text-slate-400">
+                      No transactions yet. Add your first entry to populate this table.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  sortedTransactions.map((tx) => (
+                    <tr key={tx.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50">
+                      <td className="py-3 text-slate-500">{tx.dateFormatted}</td>
+                      <td className="py-3 font-medium text-slate-800">{tx.description || "—"}</td>
+                      <td className="py-3">
+                        <span
+                          className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium"
+                          style={{
+                            backgroundColor: `${categoryColors[tx.category] || categoryColors.Other}15`,
+                            color: categoryColors[tx.category] || categoryColors.Other,
+                          }}
+                        >
+                          <span
+                            className="h-1.5 w-1.5 rounded-full"
+                            style={{ backgroundColor: categoryColors[tx.category] || categoryColors.Other }}
+                          />
+                          {tx.category}
+                        </span>
+                      </td>
+                      <td className="py-3 text-right font-semibold text-slate-800">
+                        {formatMoney(tx.amount)}
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -461,7 +579,7 @@ function ShortTerm() {
                 </div>
               )}
               {subscriptions.slice(0, 5).map((sub) => {
-                const nextDate = new Date(sub.nextBilling);
+                const nextDate = sub.nextBilling ? new Date(sub.nextBilling) : null;
                 const isUpcoming = upcomingSubscriptions.find((s) => s.id === sub.id);
                 return (
                   <div
@@ -471,11 +589,13 @@ function ShortTerm() {
                     }`}
                   >
                     <div className="flex items-center gap-3">
-                      <span className="text-xl">{sub.icon}</span>
+                      <span className="text-xl">{sub.icon || "🔔"}</span>
                       <div>
                         <p className="text-sm font-medium text-slate-800">{sub.name}</p>
                         <p className="text-xs text-slate-500">
-                          {nextDate.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                          {nextDate
+                            ? nextDate.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+                            : "No billing date"}
                           {isUpcoming && <span className="ml-1 text-amber-600">• Soon</span>}
                         </p>
                       </div>
@@ -516,7 +636,7 @@ function ShortTerm() {
                   className="flex items-center justify-between rounded-lg bg-slate-50 p-3"
                 >
                   <div className="flex items-center gap-3">
-                    <span className="text-xl">{account.icon}</span>
+                    <span className="text-xl">{account.icon || "🏦"}</span>
                     <div>
                       <p className="text-sm font-medium text-slate-800">{account.name}</p>
                       <p className="text-xs text-slate-500">
@@ -554,11 +674,11 @@ function ShortTerm() {
                 <div
                   key={card.id}
                   className="rounded-lg p-3"
-                  style={{ backgroundColor: `${card.color}08` }}
+                  style={{ backgroundColor: `${card.color || "#e2e8f0"}08` }}
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                      <span className="text-xl">{card.icon}</span>
+                      <span className="text-xl">{card.icon || "💳"}</span>
                       <div>
                         <p className="text-sm font-medium text-slate-800">{card.name}</p>
                         <p className="text-xs text-slate-500">
@@ -604,13 +724,125 @@ function ShortTerm() {
               <div className="flex items-center justify-between">
                 <p className="text-sm font-medium text-slate-700">Total Rewards Value</p>
                 <p className="text-lg font-bold text-emerald-600">
-                  ~{formatMoney(totalPointsValue + creditCards.find(c => c.cashbackEarned)?.cashbackEarned || 0)}
+                  ~{formatMoney(totalPointsValue + totalCashbackEarned)}
                 </p>
               </div>
             </div>
           </div>
         </div>
       </main>
+
+      {isModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 px-4"
+          onClick={handleCloseModal}
+        >
+          <div
+            className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-emerald-500">
+                  New Transaction
+                </p>
+                <h3 className="mt-1 text-xl font-semibold text-slate-900">
+                  Add manual spending entry
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={handleCloseModal}
+                className="rounded-full p-1 text-slate-500 transition hover:bg-slate-100"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form className="mt-6 space-y-4" onSubmit={handleSubmit}>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label className="text-sm font-medium text-slate-700">
+                  Date
+                  <input
+                    type="date"
+                    name="date"
+                    value={formData.date}
+                    onChange={handleInputChange}
+                    className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
+                    required
+                  />
+                </label>
+                <label className="text-sm font-medium text-slate-700">
+                  Category
+                  <select
+                    name="category"
+                    value={formData.category}
+                    onChange={handleInputChange}
+                    className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
+                    required
+                  >
+                    {categoryOptions.map((category) => (
+                      <option key={category} value={category}>
+                        {category}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <label className="text-sm font-medium text-slate-700">
+                Description
+                <input
+                  type="text"
+                  name="description"
+                  value={formData.description}
+                  onChange={handleInputChange}
+                  placeholder="e.g. Grocery run"
+                  className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
+                />
+              </label>
+
+              <label className="text-sm font-medium text-slate-700">
+                Amount
+                <input
+                  type="number"
+                  step="0.01"
+                  name="amount"
+                  value={formData.amount}
+                  onChange={handleInputChange}
+                  className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
+                  required
+                />
+              </label>
+
+              {formError && (
+                <p className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-600">
+                  {formError}
+                </p>
+              )}
+
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={handleCloseModal}
+                  className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600"
+                  disabled={isSaving}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-70"
+                  disabled={isSaving}
+                >
+                  {isSaving ? "Saving..." : "Save Transaction"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
