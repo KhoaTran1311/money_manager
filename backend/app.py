@@ -1,3 +1,4 @@
+import math
 import os
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -50,6 +51,18 @@ def _normalize_number(value):
         return float(value)
     except (TypeError, ValueError):
         return value
+
+
+def _to_float(value):
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return number
 
 
 @app.route("/health/")
@@ -331,6 +344,182 @@ def _serialize_asset(item):
         "countries": item.get("countries") or "",
         "currency": item.get("currency") or "",
     }
+
+
+def _parse_query_date(field_name):
+    value = (request.args.get(field_name) or "").strip()
+    if not value:
+        return None
+    return _parse_date(value, field_name)
+
+
+def _fetch_latest_market_data(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        history = ticker.history(period="5d", interval="1d")
+    except Exception:
+        return None
+
+    if history is None or history.empty:
+        return None
+
+    latest = history.tail(1).iloc[0]
+    timestamp = latest.name
+    price_date = timestamp.date() if hasattr(timestamp, "date") else None
+    if price_date is None:
+        return None
+
+    try:
+        info = ticker.get_info() or {}
+        currency = info.get("currency")
+    except Exception:
+        currency = None
+
+    return {
+        "price_date": price_date,
+        "open": _to_float(latest.get("Open")),
+        "high": _to_float(latest.get("High")),
+        "low": _to_float(latest.get("Low")),
+        "close": _to_float(latest.get("Close")),
+        "volume": _to_float(latest.get("Volume")),
+        "currency": currency,
+    }
+
+
+@app.route("/api/long-term/prices/snapshot/", methods=["POST"])
+def long_term_price_snapshot():
+    assets_result = (
+        supabase.table("portfolio_assets")
+        .select("id,ticker,shares,currency")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    error_response = _handle_supabase_error(assets_result)
+    if error_response:
+        return error_response
+
+    assets = assets_result.data or []
+    if not assets:
+        return jsonify({"updated": 0, "skipped": 0, "message": "No assets found."})
+
+    market_cache = {}
+    records = []
+    skipped = 0
+
+    for asset in assets:
+        symbol = (asset.get("ticker") or "").strip().upper()
+        shares = _to_float(asset.get("shares"))
+        if not symbol or shares is None:
+            skipped += 1
+            continue
+
+        if symbol not in market_cache:
+            market_cache[symbol] = _fetch_latest_market_data(symbol)
+        market = market_cache.get(symbol)
+        if not market or market.get("close") is None:
+            skipped += 1
+            continue
+
+        value = market["close"] * shares if market.get("close") is not None else None
+        record = {
+            "asset_id": asset.get("id"),
+            "price_date": market["price_date"].isoformat(),
+            "ticker": symbol,
+            "open": market.get("open"),
+            "high": market.get("high"),
+            "low": market.get("low"),
+            "close": market.get("close"),
+            "volume": market.get("volume"),
+            "currency": market.get("currency") or asset.get("currency"),
+            "shares": shares,
+            "value": value,
+        }
+        records.append(record)
+
+    if not records:
+        return jsonify({"updated": 0, "skipped": skipped, "message": "No prices saved."})
+
+    insert_result = (
+        supabase.table("portfolio_asset_prices")
+        .upsert(records, on_conflict="asset_id,price_date")
+        .execute()
+    )
+    error_response = _handle_supabase_error(insert_result)
+    if error_response:
+        return error_response
+
+    snapshot_dates = sorted({item["price_date"] for item in records})
+    return jsonify(
+        {
+            "updated": len(records),
+            "skipped": skipped,
+            "dates": snapshot_dates,
+        }
+    )
+
+
+@app.route("/api/long-term/prices/portfolio/")
+def long_term_portfolio_prices():
+    try:
+        start_date = _parse_query_date("start")
+        end_date = _parse_query_date("end")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    query = supabase.table("portfolio_asset_prices").select("price_date,value")
+    if start_date:
+        query = query.gte("price_date", start_date.isoformat())
+    if end_date:
+        query = query.lte("price_date", end_date.isoformat())
+    result = query.execute()
+    error_response = _handle_supabase_error(result)
+    if error_response:
+        return error_response
+
+    totals = {}
+    for item in (result.data or []):
+        price_date = item.get("price_date")
+        value = _to_float(item.get("value")) or 0
+        totals[price_date] = totals.get(price_date, 0) + value
+
+    payload = [
+        {"date": price_date, "value": total}
+        for price_date, total in sorted(totals.items())
+    ]
+    return jsonify(payload)
+
+
+@app.route("/api/long-term/prices/assets/<asset_id>/")
+def long_term_asset_prices(asset_id):
+    try:
+        start_date = _parse_query_date("start")
+        end_date = _parse_query_date("end")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    query = (
+        supabase.table("portfolio_asset_prices")
+        .select("price_date,close,value")
+        .eq("asset_id", asset_id)
+    )
+    if start_date:
+        query = query.gte("price_date", start_date.isoformat())
+    if end_date:
+        query = query.lte("price_date", end_date.isoformat())
+    result = query.order("price_date", desc=False).execute()
+    error_response = _handle_supabase_error(result)
+    if error_response:
+        return error_response
+
+    payload = [
+        {
+            "date": item.get("price_date"),
+            "price": _to_float(item.get("close")),
+            "value": _to_float(item.get("value")),
+        }
+        for item in (result.data or [])
+    ]
+    return jsonify(payload)
 
 
 @app.route("/api/long-term/assets/", methods=["GET", "POST"])

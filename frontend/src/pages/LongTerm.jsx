@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 
+import PortfolioHistoryChart from "../components/PortfolioHistoryChart.jsx";
 import { formatMoney } from "../utils/format.js";
 
 const BREAKDOWN_TABS = [
@@ -589,6 +590,7 @@ function LongTerm() {
       </header>
 
       <main className="mx-auto max-w-6xl space-y-6 px-6 py-8">
+        <PortfolioHistoryChart assets={assets} />
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
